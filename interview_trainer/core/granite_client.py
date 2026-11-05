@@ -71,6 +71,10 @@ class GraniteClient:
         self._project_id = project_id or WATSONX_PROJECT_ID
         self._model_id = model_id or WATSONX_MODEL_ID
         self._client = None  # lazy init
+        # Token usage tracking (accumulated across all calls this session)
+        self.total_input_tokens: int = 0
+        self.total_output_tokens: int = 0
+        self.total_calls: int = 0
 
     # ------------------------------------------------------------------
     # Public API
@@ -185,22 +189,46 @@ class GraniteClient:
             )
 
     def _call_model(self, client, prompt: str, params: dict) -> str:
-        """Call the model using chat API (preferred) or generate_text (legacy fallback)."""
+        """Call the model using chat API (preferred) or generate_text (legacy fallback).
+
+        Also extracts and accumulates token usage from the API response.
+        """
         # Try chat API first (current watsonx.ai SDK standard)
         try:
             response = client.chat(
                 messages=[{"role": "user", "content": prompt}],
                 params=params,
             )
-            # Extract content from chat response
+            # Extract token usage if present
             if isinstance(response, dict):
+                usage = response.get("usage", {})
+                self.total_input_tokens += usage.get("prompt_tokens", 0)
+                self.total_output_tokens += usage.get("completion_tokens", 0)
+                self.total_calls += 1
                 choices = response.get("choices", [])
                 if choices:
                     return choices[0].get("message", {}).get("content", "")
+            self.total_calls += 1
             return str(response)
         except Exception:
             # Fallback to generate_text for models that don't support chat
-            return client.generate_text(prompt=prompt, params=params)
+            result = client.generate_text(prompt=prompt, params=params)
+            self.total_calls += 1
+            return result
+
+    @property
+    def token_usage(self) -> dict[str, int]:
+        """Return accumulated token usage for this client instance.
+
+        Returns:
+            Dict with keys: input_tokens, output_tokens, total_tokens, total_calls.
+        """
+        return {
+            "input_tokens": self.total_input_tokens,
+            "output_tokens": self.total_output_tokens,
+            "total_tokens": self.total_input_tokens + self.total_output_tokens,
+            "total_calls": self.total_calls,
+        }
 
     def _get_client(self):
         """Lazy-initialise the watsonx.ai ModelInference client."""
